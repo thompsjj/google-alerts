@@ -7,10 +7,13 @@ import os
 import pickle
 import re
 import sys
-
+import time
+import contextlib
 import requests
 import requests.utils
 from bs4 import BeautifulSoup
+import selenium.webdriver as webdriver
+
 
 __author__ = "Brandon Dixon"
 __copyright__ = "Copyright, Brandion Dixon"
@@ -67,40 +70,145 @@ def obfuscate(p, action):
     It's best to use a throw away account for these alerts to avoid having
     your authentication put at risk by storing it locally.
     """
-    key = "ru7sll3uQrGtDPcIW3okutpFLo6YYtd5bWSpbZJIopYQ0Du0a1WlhvJOaZEH"
-    s = list()
-    if action == 'store':
-        if PY2:
-            for i in range(len(p)):
-                kc = key[i % len(key)]
-                ec = chr((ord(p[i]) + ord(kc)) % 256)
-                s.append(ec)
-            return base64.urlsafe_b64encode("".join(s))
-        else:
-            return base64.urlsafe_b64encode(p.encode()).decode()
-    else:
-        if PY2:
-            e = base64.urlsafe_b64decode(p)
-            for i in range(len(e)):
-                kc = key[i % len(key)]
-                dc = chr((256 + ord(e[i]) - ord(kc)) % 256)
-                s.append(dc)
-            return "".join(s)
-        else:
-            e = base64.urlsafe_b64decode(p)
-            return e.decode()
+    return p
+    # key = "ru7sll3uQrGtDPcIW3okutpFLo6YYtd5bWSpbZJIopYQ0Du0a1WlhvJOaZEH"
+    # s = list()
+    # if action == 'store':
+    #     if PY2:
+    #         for i in range(len(p)):
+    #             kc = key[i % len(key)]
+    #             ec = chr((ord(p[i]) + ord(kc)) % 256)
+    #             s.append(ec)
+    #         return base64.urlsafe_b64encode("".join(s))
+    #     else:
+    #         return base64.urlsafe_b64encode(p.encode()).decode()
+    # else:
+    #     if PY2:
+    #         e = base64.urlsafe_b64decode(p)
+    #         for i in range(len(e)):
+    #             kc = key[i % len(key)]
+    #             dc = chr((256 + ord(e[i]) - ord(kc)) % 256)
+    #             s.append(dc)
+    #         return "".join(s)
+    #     else:
+    #         e = base64.urlsafe_b64decode(p)
+    #         return e.decode()
 
-
+AUTH_COOKIE_NAME = 'SIDCC'
 CONFIG_PATH = os.path.expanduser('~/.config/google_alerts')
 CONFIG_FILE = os.path.join(CONFIG_PATH, 'config.json')
 SESSION_FILE = os.path.join(CONFIG_PATH, 'session')
 CONFIG_DEFAULTS = {'email': '', 'password': '', 'py2': PY2}
 
 
+class GoogleAlertsManager:
+
+    def __init__(self, email, pwd, timeout, driver_path):
+        self.status = 'waiting'
+        self.email = email
+        self.pwd = pwd
+        self.driver = driver_path
+        self.timeout = timeout
+        self.config = None
+        self.ga = None
+
+        try:
+            if (not os.path.exists(CONFIG_PATH)) or (not os.path.exists(CONFIG_FILE)):
+                raise ValueError("Run setup before any other actions!")
+            else:
+                self.config = json.load(open(CONFIG_FILE))
+                if self.config.get('py2', PY2) != PY2:
+                    raise ValueError("Python versions have changed. Please run `setup` again to reconfigure the client.")
+                if self.config['password'] == '':
+                    raise ValueError("Run setup before any other actions!")
+        except ValueError:
+            print("No setup detected. Initializing setup.")
+
+            if self.setup():
+
+                if (not os.path.exists(CONFIG_PATH)) or (not os.path.exists(CONFIG_FILE)):
+                    raise Exception("Setup Has Failed")
+
+            else:
+                raise Exception("Setup Has Failed")
+
+    def setup(self):
+        if not os.path.exists(CONFIG_PATH):
+            os.makedirs(CONFIG_PATH)
+        if not os.path.exists(CONFIG_FILE):
+            json.dump(CONFIG_DEFAULTS, open(CONFIG_FILE, 'w'), indent=4,
+                      separators=(',', ': '))
+        self.config = CONFIG_DEFAULTS
+        self.config['email'] = self.email
+        self.config['password'] = str(obfuscate(self.pwd, 'store'))
+        json.dump(self.config, open(CONFIG_FILE, 'w'), indent=4,
+                  separators=(',', ': '))
+
+        self.status = 'setup appears to be complete'
+
+        return os.path.exists(CONFIG_FILE)
+
+    def clear_config(self):
+
+        if os.path.exists(CONFIG_FILE):
+            os.remove(CONFIG_FILE)
+
+        return not os.path.exists(CONFIG_FILE)
+
+
+    def initialize_ga(self):
+        self.config['password'] = obfuscate(str(self.config['password']), 'fetch')
+
+        print(f"initialize ga user: {self.config['email']} password: {self.config['password']}")
+
+        self.ga = GoogleAlerts(self.config['email'], self.config['password'])
+        chrome_options = webdriver.ChromeOptions()
+        chrome_options.add_experimental_option("excludeSwitches", ['enable-automation'])
+        caps = webdriver.DesiredCapabilities.CHROME.copy()
+        caps['acceptInsecureCerts'] = True
+        with contextlib.closing(webdriver.Chrome(self.driver, options=chrome_options)) as driver:
+            driver.get('https://stackoverflow.com/users/signup?ssrc=head&returnurl=%2fusers%2fstory%2fcurrent%27')
+            time.sleep(3)
+            driver.find_element_by_xpath('//*[@id="openid-buttons"]/button[1]').click()
+            driver.find_element_by_xpath('//input[@type="email"]').send_keys(self.config['email'])
+            driver.find_element_by_xpath('//*[@id="identifierNext"]').click()
+            time.sleep(3)
+            driver.find_element_by_xpath('//input[@type="password"]').send_keys(self.config['password'])
+            driver.find_element_by_xpath('//*[@id="passwordNext"]').click()
+            time.sleep(3)
+            driver.get('https://www.google.com/alerts')
+            self.status = "[*] Filled in password and submitted."
+            self.status = f"[!] Waiting for the authentication cookie for {self.timeout} seconds"
+            cookies = None
+            for _ in range(0, self.timeout):
+                cookies = driver.get_cookies()
+                if [x for x in cookies if x['name'] == AUTH_COOKIE_NAME]:
+                    self.status = "[$] Session has been seeded, google-alerts is ready for use."
+                    break
+                time.sleep(1)
+            collected = dict()
+            for cookie in cookies:
+                collected[str(cookie['name'])] = str(cookie['value'])
+            with open(SESSION_FILE, 'wb') as f:
+                pickle.dump(collected, f, protocol=2)
+
+            if self.status != "[$] Session has been seeded, google-alerts is ready for use.":
+                raise Exception("Catastrophic failure. password or username likely not accepted by google alerts frontend.")
+
+        print("authenticating user")
+        self.ga.authenticate()
+        if self.ga._is_authenticated:
+
+            return self.ga
+
+        else:
+            raise Exception("Catastrophic failure. Authentication failed.")
+
+
 class GoogleAlerts:
 
     NAME = "GoogleAlerts"
-    LOG_LEVEL = logging.DEBUG
+    LOG_LEVEL = logging.INFO
     LOGIN_URL = 'https://accounts.google.com/signin'
     AUTH_URL = 'https://accounts.google.com/signin/challenge/sl/password'
     ALERTS_URL = 'https://www.google.com/alerts'
@@ -123,6 +231,7 @@ class GoogleAlerts:
         1: 'MAIL',
         2: 'RSS'
     }
+
     HEADERS = {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/60.0.3112.90 Safari/537.36'
     }
@@ -233,6 +342,7 @@ class GoogleAlerts:
             try:
                 match = p.search(i.string)
                 state = json.loads(match.group(0)[13:-6])
+                self._log.debug(state)
                 if state != "":
                     self._state = state
                     self._log.debug("State value set: %s" % self._state)
@@ -242,6 +352,49 @@ class GoogleAlerts:
                     'Please file a bug at https://github.com/9b/google-alerts/issues.'
                 )
         return self._state
+
+    def _get_source_options(self, inp_string):
+
+        auto = True if len(re.compile('auto', re.IGNORECASE).findall(inp_string)) else False
+        news = True if len(re.compile('news', re.IGNORECASE).findall(inp_string)) else False
+        web = True if len(re.compile('web', re.IGNORECASE).findall(inp_string)) else False
+        blogs = True if len(re.compile('blogs', re.IGNORECASE).findall(inp_string)) else False
+        video = True if len(re.compile('video', re.IGNORECASE).findall(inp_string)) else False
+        books = True if len(re.compile('books', re.IGNORECASE).findall(inp_string)) else False
+        discussion = True if len(re.compile('discussion', re.IGNORECASE).findall(inp_string)) else False
+        finance = True if len(re.compile('finance', re.IGNORECASE).findall(inp_string)) else False
+
+        field_2 = []
+
+        if video:
+            field_2.append(5)
+        if books:
+            field_2.append(6)
+        if discussion:
+            field_2.append(7)
+        if finance:
+            field_2.append(8)
+
+        # here we make a set of simple keys
+
+        field_1 = []
+
+        if auto or (news and web and blogs):
+            field_1 = [1, 2, 3]
+        elif news and web and not blogs:
+            field_1 = [1]
+        elif blogs and web and not news:
+            field_1 = [2]
+        elif news and blogs and not web:
+            field_1 = [3]
+        elif news and not blogs and not web:
+            field_1 = [1, 3]
+        elif web and not blogs and not news:
+            field_1 = [1, 2]
+        elif blogs and not web and not news:
+            field_1 = [2, 3]
+
+        return None, field_2, field_1
 
     def _build_payload(self, term, options):
         if 'delivery' not in options:
@@ -253,7 +406,15 @@ class GoogleAlerts:
         ialert_freq = {v: k for k, v in self.ALERT_FREQ.items()}
         freq_option = options.get('alert_frequency', 'AT_MOST_ONCE_A_DAY')
         freq_option = ialert_freq[freq_option]
+
+        source_fa, source_fb, source_fc = None, None, None
+
+        if 'sources' in options:
+            sources_info = options.get('sources', 'auto')
+            source_fa, source_fb, source_fc = self._get_source_options(sources_info)
+
         if 'alert_frequency' not in options:
+
             options['alert_frequency'] = 'AT_MOST_ONCE_A_DAY'
         if options.get('exact', False):
             term = "\"%s\"" % term
@@ -263,26 +424,26 @@ class GoogleAlerts:
                        language, region], None, None, None, 0, 1], None,
                        monitor_match, [[None, 2, "", [], 1, "en-US", None,
                        None, None, None, None, "0", None, None,
-                       self._state[2]]]]]
+                       self._state[2]]], source_fa, source_fb, source_fc]]
         else:
             if options['alert_frequency'] == 'AT_MOST_ONCE_A_DAY':
                 payload = [None, [None, None, None, [None, term, "com", [None,
                            language, region], None, None, None, 0, 1], None,
                            monitor_match, [[None, 1, self._email, [None, None, 3],
                            freq_option, "en-US", None, None, None, None, None, "0",
-                           None, None, self._state[2]]]]]
+                           None, None, self._state[2]]], source_fa, source_fb, source_fc]]
             elif options['alert_frequency'] == 'AS_IT_HAPPENS':
                 payload = [None, [None, None, None, [None, term, "com", [None,
                            language, region], None, None, None, 0, 1], None,
                            monitor_match, [[None, 1, self._email, [], freq_option,
                            "en-US", None, None, None, None, None, "0",
-                           None, None, self._state[2]]]]]
+                           None, None, self._state[2]]], source_fa, source_fb, source_fc]]
             elif options['alert_frequency'] == 'AT_MOST_ONCE_A_WEEK':
                 payload = [None, [None, None, None, [None, term, "com", [None,
                            language, region], None, None, None, 0, 1], None,
                            monitor_match, [[None, 1, self._email, [None, None, 0, 3],
                            freq_option, "en-US", None, None, None, None, None, "0",
-                           None, None, self._state[2]]]]]
+                           None, None, self._state[2]]], source_fa, source_fb, source_fc]]
 
         if options.get('action') == 'MODIFY':
             payload.insert(1, options.get('monitor_id'))
@@ -351,6 +512,8 @@ class GoogleAlerts:
                 obj['term'] = monitor[1][2][0]
                 if term and obj['term'] != term:
                     continue
+                obj['source_field_2'] = monitor[1][-2]
+                obj['source_field_1'] = monitor[1][-1]
                 obj['language'] = monitor[1][2][2][0]
                 obj['region'] = monitor[1][2][2][1]
                 obj['delivery'] = self.DELIVERY[monitor[1][5][0][0]]
